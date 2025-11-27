@@ -1,24 +1,22 @@
 #! /usr/bin/env python3
 
-import os
-import torch
 import time
-import datetime
-import numpy as np
-import copy
-import logging
 
-from pathlib import Path
-from RapidIn.calc_inner import s_test, grad_z
-from RapidIn.utils import save_json, display_progress
-
-import numpy as np
+from RapidIn.calc_inner import s_test
 
 IGNORE_INDEX = -100
 
 
 def calc_s_test_single(model, z_test, t_test, input_len, train_loader, gpu=-1,
-                       damp=0.01, scale=25, recursion_depth=5000, r=1, need_reshape=True):
+                       damp: float = 0.01, scale: int = 25, 
+                       recursion_depth: int = 5000, r: int = 1, 
+                       need_reshape: bool =True):
+    """
+    Calculate the s_test vector (iHVP) for a single test example using the LiSSA algorithm.
+    
+    Runs `s_test` function `r` times and averages the results
+    to reduce variance of the stochastic estimation.
+    """
     min_nan_depth = recursion_depth
     res, nan_depth = s_test(z_test, t_test, input_len, model, train_loader,
                  gpu=gpu, damp=damp, scale=scale,

@@ -3,10 +3,17 @@ import json
 import logging
 from pathlib import Path
 from datetime import datetime as dt
-import datetime
-from tqdm import tqdm
 import collections.abc
-import torch
+
+from tqdm import tqdm
+
+
+DEFAULT_TEMPLATE = "Below is an instruction that describes a task. " \
+    "Write a response that appropriately completes the request.\n\n" \
+    "### Instruction:\n{instruction}\n\n### Response: "
+
+DEFAULT_RESPONSE_FIELD = "output"
+
 
 tqdm_dict = {}
 def save_json(json_obj, json_path, append_if_exists=False,
@@ -134,6 +141,10 @@ def get_default_config():
             "end_id": None,
             "test_begin_id": None,
             "test_end_id": None,
+            "template": DEFAULT_TEMPLATE,
+            "test_template": None,  # by default `template` is used for both trainig and test data. If `test_template` is provided it will be used for test data. This may be useful if the field has different naming in the test dataset."
+            "response_field": DEFAULT_RESPONSE_FIELD,
+            "test_response_field": None, # by default `response_field` is used for both trainig and test data. If `test_response_field` is provided it will be used for test data. This may be useful if the field has different naming in the test dataset."
         },
         "influence": {
             "outdir": "outdir",
@@ -219,3 +230,15 @@ def get_config(config_path):
     config = Struct(config)
     sanity_check(config)
     return config
+
+
+def get_test_template(config: Struct) -> str:
+    if config.data.test_template is not None:
+        return config.data.test_template
+    return config.data.template
+
+
+def get_test_response_field(config: Struct) -> str:
+    if config.data.test_response_field is not None:
+        return config.data.test_response_field
+    return config.data.response_field

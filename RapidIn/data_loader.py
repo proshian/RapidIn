@@ -1,26 +1,21 @@
-import os
-from typing import Dict, Optional, Sequence
-from transformers import AutoTokenizer, LlamaForCausalLM, BitsAndBytesConfig
+from typing import Dict, Sequence, Union, List
 import json
 import copy
-import torch
 import logging
-from torch.utils.data import Dataset
-from torch.utils.data import DataLoader
-from peft import PeftModel, set_peft_model_state_dict, prepare_model_for_kbit_training
 import random
-import numpy as np
+
+from transformers import AutoTokenizer, AutoModelForCausalLM, BitsAndBytesConfig
+import torch
+from torch.utils.data import Dataset
+from peft import PeftModel, set_peft_model_state_dict, prepare_model_for_kbit_training
 import transformers
+
 
 IGNORE_INDEX = -100
 DEFAULT_PAD_TOKEN = "[PAD]"
 DEFAULT_EOS_TOKEN = "</s>"
 DEFAULT_BOS_TOKEN = "<s>"
-DEFAULT_UNK_TOKEN = "<unk>"
-prompt_no_input = \
-    "Below is an instruction that describes a task. " \
-    "Write a response that appropriately completes the request.\n\n" \
-    "### Instruction:\n{instruction}\n\n### Response: "
+DEFAULT_UNK_TOKEN = "<unk>"    
 
 def smart_tokenizer_and_embedding_resize(
     special_tokens_dict,
@@ -68,12 +63,12 @@ def get_model(config, tokenizer=None, **kwargs):
         )
 
     if device_map is None:
-        model = LlamaForCausalLM.from_pretrained(
+        model = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 low_cpu_mem_usage=False
         )
     else:
-        model = LlamaForCausalLM.from_pretrained(
+        model = AutoModelForCausalLM.from_pretrained(
                 model_path,
                 quantization_config=bnb_config,
                 device_map=device_map
@@ -178,7 +173,8 @@ def preprocess(
 ) -> Dict:
     """Preprocess the data by tokenizing."""
     examples = [s + t for s, t in zip(sources, targets)]
-    examples_tokenized, sources_tokenized = [_tokenize_fn(strings, tokenizer) for strings in (examples, sources)]
+    examples_tokenized = _tokenize_fn(examples, tokenizer)
+    sources_tokenized = _tokenize_fn(sources, tokenizer)
     input_ids = examples_tokenized["input_ids"]
     labels = copy.deepcopy(input_ids)
     for label, source_len in zip(labels, sources_tokenized["input_ids_lens"]):
@@ -187,16 +183,39 @@ def preprocess(
 
 
 class TrainDataset(Dataset):
-    def __init__(self, data_path: str, tokenizer: transformers.PreTrainedTokenizer, shuffle: bool = True, shuffle_seed: int = 42, load_idx_list = None, begin_id = None, end_id = None):
-        super(TrainDataset, self).__init__()
+    def __init__(self, 
+                 data_path: str, 
+                 tokenizer: transformers.PreTrainedTokenizer,
+                 prompt_template: str,
+                 response_fiels: str,
+                 shuffle: bool = True, 
+                 shuffle_seed: int = 42, 
+                 load_idx_list: Union[List[int], None] = None, 
+                 begin_id: Union[int, None] = None, 
+                 end_id: Union[int, None] = None) -> None:
+        """
+        Arguments:
+        ----------
+        load_idx_list: list[int] | None
+            List of indices to load from the dataset. If None, all data is loaded.
+        begin_id: int | None
+            Together with end_id, is an alternative way to specify a range of indices to load.
+            The data will include data starting from this index.
+        end_id: int | None
+            Together with begin_id, is an alternative way to specify a range of indices to load.
+            The data will include data up to, but not including, this index.
+            Is only used if begin_id is not None. 
+            If None, the dataset will include data up to the end.
+        """
+        super().__init__()
         logging.warning("Loading data...")
         list_data_dict = read_data(data_path)
 
         logging.warning("Formatting inputs...")
         sources = [
-            prompt_no_input.format_map(example) for example in list_data_dict
+            prompt_template.format_map(example) for example in list_data_dict
         ]
-        targets = [f"{example['output']}{tokenizer.eos_token}" for example in list_data_dict]
+        targets = [f"{example[response_fiels]}{tokenizer.eos_token}" for example in list_data_dict]
         if begin_id is not None:
             if end_id is None:
                 end_id = len(sources)
@@ -219,13 +238,14 @@ class TrainDataset(Dataset):
             random.shuffle(s)
 
         self.input_ids = [ data_dict["input_ids"][i] for i in s ]
+        # `sorted_index` are indices of the original data before shuffling
         self.sorted_index = [ load_idx_list[i] for i in s ]
         self.list_data_dict = [ list_data_dict[i] for i in s ]
         self.labels = [ data_dict["labels"][i] for i in s ]
         self.input_ids_lens = [ data_dict["input_ids_lens"][i] for i in s ]
 
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.input_ids)
 
     def __getitem__(self, i):
@@ -233,8 +253,12 @@ class TrainDataset(Dataset):
 
 
 class TestDataset(Dataset):
-    def __init__(self, data_path: str, tokenizer: transformers.PreTrainedTokenizer):
-        super(TestDataset, self).__init__()
+    def __init__(self, 
+                 data_path: str, 
+                 tokenizer: transformers.PreTrainedTokenizer, 
+                 prompt_template: str,
+                 response_field: str) -> None:
+        super().__init__()
         logging.warning("Loading data...")
         list_data_dict = []
         if data_path is not None and len(data_path) != 0:
@@ -242,10 +266,12 @@ class TestDataset(Dataset):
 
         logging.warning("Formatting inputs...")
         sources = [
-            prompt_no_input.format_map(example) for example in list_data_dict
+            prompt_template.format_map(example) for example in list_data_dict
         ]
-        targets = [f"{example['output']}{tokenizer.eos_token}" for example in list_data_dict]
-        hotwords = [[hw.strip() for hw in example.get("hotwords", "").split('|') if hw != ""] for example in list_data_dict]
+        targets = [f"{example[response_field]}{tokenizer.eos_token}" for example in list_data_dict]
+        hotwords = [
+            [hw.strip() for hw in example.get("hotwords", "").split('|') if hw != ""] 
+            for example in list_data_dict]
 
         logging.warning("Tokenizing inputs... This may take some time...")
         data_dict = preprocess(sources, targets, tokenizer)
@@ -274,7 +300,7 @@ class TestDataset(Dataset):
         self.input_ids_lens = data_dict["input_ids_lens"]
         self.hotwords = hotwords
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.input_ids)
 
     def __getitem__(self, i) -> Dict[str, torch.Tensor]:

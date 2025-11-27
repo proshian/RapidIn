@@ -1,7 +1,5 @@
 from torch.multiprocessing import Queue, Value, Lock, Barrier, Manager, Array
 import torch.multiprocessing as mp
-from torch.utils.data import default_collate
-from torch.utils.data import Dataset
 from torch.utils.data import DataLoader
 from ctypes import c_bool, c_int
 import torch
@@ -9,15 +7,12 @@ from RapidIn.calc_inner import grad_z, calc_loss, get_params, normalize, pad, re
 from RapidIn.data_loader import get_model_tokenizer, TrainDataset, TestDataset, get_tokenizer, get_model
 from RapidIn.data_loader import get_dataset_size, read_data
 from RapidIn.influence_function import calc_s_test_single
-from RapidIn.utils import save_json, display_progress, load_json
+from RapidIn.utils import save_json, display_progress, load_json, get_test_template, get_test_response_field
 from RapidIn.RapidGrad import RapidGrad
 import numpy as np
 import time
-import json
 from pathlib import Path
 from copy import copy
-import logging
-import datetime
 import os
 import gc
 from torch.autograd import grad
@@ -37,12 +32,12 @@ def MP_run_calc_infulence_function(rank, world_size, process_id, config, mp_engi
     tokenizer = get_tokenizer(config.model, device_map=f"cuda:{rank}")
     print(f"CUDA {rank}: Tokenizer loaded!")
 
-    train_dataset = TrainDataset(config.data.train_data_path, tokenizer, shuffle=False, begin_id=config.data.begin_id, end_id=config.data.end_id)
+    train_dataset = TrainDataset(config.data.train_data_path, tokenizer, config.data.template, config.data.response_field, 
+                                 shuffle=False, begin_id=config.data.begin_id, end_id=config.data.end_id)
     train_loader = DataLoader(train_dataset, batch_size=1, shuffle=False, num_workers=0)
     print(f"CUDA {rank}: Training Datalodaer loaded!")
 
-    test_dataset = TestDataset(config.data.test_data_path, tokenizer)
-    test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=0)
+    test_dataset = TestDataset(config.data.test_data_path, tokenizer, get_test_template(config), get_test_response_field(config))
     print(f"CUDA {rank}: Testing Datalodaer loaded!")
 
     train_dataset_size = len(train_dataset)
@@ -61,18 +56,23 @@ def MP_run_calc_infulence_function(rank, world_size, process_id, config, mp_engi
         s_test_vec_list = []
         test_dataset_size = len(test_dataset)
         for i in range(test_dataset_size):
+            # `z_test` is tokenized prompt
+            # `t_test` is tokenized response
             z_test, t_test, input_len = test_dataset[i]
 
             s_test_vec = None
             if config.influence.infl_method == "IF":
                 # TODO: implement padding and reshape yet
-                s_test_vec = calc_s_test_single(model, z_test, t_test, input_len, train_dataset,
-                                            gpu=rank, recursion_depth=config.influence.IF.recursion_depth,
-                                            scale=config.influence.IF.scale,
-                                            r=config.influence.IF.r_averaging,
-                                            need_reshape=grad_reshape)
+                s_test_vec = calc_s_test_single(
+                    model, z_test, t_test, input_len, train_dataset,
+                    gpu=rank, recursion_depth=config.influence.IF.recursion_depth,
+                    scale=config.influence.IF.scale,
+                    r=config.influence.IF.r_averaging,
+                    need_reshape=grad_reshape)
             else:
-                s_test_vec = grad_z(z_test, t_test, input_len, model, gpu=rank, need_reshape=grad_reshape, use_deepspeed=config.influence.deepspeed.enable)
+                s_test_vec = grad_z(z_test, t_test, input_len, model, 
+                                    gpu=rank, need_reshape=grad_reshape, 
+                                    use_deepspeed=config.influence.deepspeed.enable)
 
             if config.influence.RapidGrad.enable and isinstance(config.influence.RapidGrad.RapidGrad_K, int):
                 s_test_vec = oporp_eng(s_test_vec, config.influence.RapidGrad.RapidGrad_K)

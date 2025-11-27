@@ -1,14 +1,11 @@
 #! /usr/bin/env python3
 
 import torch
-import gc
 import random
 import time
 from torch.autograd import grad
 import torch
 from copy import copy
-from RapidIn.utils import display_progress
-from RapidIn.data_loader import IGNORE_INDEX
 import random
 from torch.utils.data import default_collate
 import torch.nn.functional as F
@@ -41,15 +38,37 @@ def pad(x):
     return x
 
 
-def reshape(x):
-    step = 421527552
+def reshape(x: torch.Tensor, step: int=421527552) -> torch.Tensor:
+    """
+    Split a very large 1-D gradient vector into multiple contiguous chunks.
+
+    The vector is reshaped into rows of size ceil(len(x) / step).
+
+    AFAIU Chunking is required to perform a pseudo-random shuffle 
+    using row and column permutations.
+
+    Returns a 2-D tensor where each row is one chunk of the original vector.
+
+    Is used in `s_test` and `grad_z` functions if `need_reshape` is True.
+
+    Expects that pad was called before to make the length divisible by `n_step`.
+    """
     n_step = (len(x) - 1)//step + 1
+    if len(x) % n_step != 0:
+        raise ValueError(
+            f"reshape() requires len(x) divisible by n_step "
+            f"(len={len(x)}, n_step={n_step}). Did you forget to pad() first?"
+        )
     x = x.reshape((n_step, -1))
     return x
 
 
-def s_test(z_test, t_test, input_len, model, z_loader, gpu=-1, damp=0.01, scale=25.0,
+def s_test(z_test, t_test, input_len, model, z_loader, gpu=-1, 
+           damp=0.01, scale=25.0,
            recursion_depth=5000, need_reshape=True):
+    """
+    LiSSA algorithm for estimating inverse Hessian-vector products.
+    """
     params = get_params(model)
 
     v = grad_z(z_test, t_test, input_len, model, gpu, need_reshape=False)
